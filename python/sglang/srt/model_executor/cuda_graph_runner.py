@@ -351,6 +351,7 @@ class CudaGraphRunner:
                 )
                 if self.disable_padding
                 else max_num_tokens <= self.max_bs
+                else max_num_tokens <= self.max_bs
             )
         else:
             is_bs_supported = (
