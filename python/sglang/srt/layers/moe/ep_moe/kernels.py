@@ -768,6 +768,15 @@ def grouped_gemm_triton_kernel(
 
 
 @triton.jit
+def compute_masked_num_tiles_ptr(
+    num_tiles_indptr, masked_m_ptr, batch_size: tl.constexpr, BLOCK_SIZE_M: tl.constexpr
+):
+    for i in range(batch_size):
+        m = tl.load(masked_m_ptr + i)
+        tl.store(num_tiles_indptr + i, tl.cdiv(m, BLOCK_SIZE_M))
+
+
+@triton.jit
 def compute_m_num_tiles_indptr(
     m_num_tiles_indptr, seg_indptr, batch_size: tl.constexpr, BLOCK_SIZE_M: tl.constexpr
 ):
@@ -868,6 +877,7 @@ def grouped_gemm_masked_triton(
 ):
     assert len(a.shape) == 3
     assert len(b.shape) == 3
+    assert len(b.shape) == 3
     assert a.is_contiguous()
     assert b.is_contiguous()
 
@@ -881,12 +891,17 @@ def grouped_gemm_masked_triton(
         a.shape[0],
         triton.cdiv(a.shape[1], META["BLOCK_SIZE_M"]) + a.shape[0],
         triton.cdiv(b.shape[1], META["BLOCK_SIZE_N"]),
+        triton.cdiv(a.shape[1], META["BLOCK_SIZE_M"]) + a.shape[0],
+        triton.cdiv(b.shape[1], META["BLOCK_SIZE_N"]),
     )
 
     grouped_gemm_masked_triton_kernel[grid](
         a,
         b,
         c,
+        a.shape[1],
+        b.shape[1],
+        b.shape[2],
         a.shape[1],
         b.shape[1],
         b.shape[2],
