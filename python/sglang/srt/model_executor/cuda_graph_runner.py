@@ -60,6 +60,14 @@ def get_is_capture_mode():
     return is_capture_mode
 
 
+# Detect whether the current forward pass is in capture mode
+is_capture_mode = False
+
+
+def get_is_capture_mode():
+    return is_capture_mode
+
+
 def _to_torch(model: torch.nn.Module, reverse: bool, num_tokens: int):
     for sub in model._modules.values():
         if isinstance(sub, CustomOp):
