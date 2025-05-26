@@ -259,7 +259,7 @@ class EPMoE(torch.nn.Module):
             ),
         )
 
-        reorder_topk_ids, src2dst, seg_indptr, masked_m = run_moe_ep_preproess(
+        reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(
             topk_ids, self.num_experts
         )
 

@@ -164,11 +164,7 @@ def run_moe_ep_preproess(topk_ids: torch.Tensor, num_experts: int):
         reorder_ids, src2dst, topk_ids.numel(), BLOCK_SIZE
     )
 
-    if len(seg_indptr) > 1:
-        masked_m = seg_indptr[1:] - seg_indptr[:-1]
-    else:
-        masked_m = None
-    return reorder_topk_ids, src2dst, seg_indptr, masked_m
+    return reorder_topk_ids, src2dst, seg_indptr
 
 
 @triton.jit
@@ -891,17 +887,12 @@ def grouped_gemm_masked_triton(
         a.shape[0],
         triton.cdiv(a.shape[1], META["BLOCK_SIZE_M"]) + a.shape[0],
         triton.cdiv(b.shape[1], META["BLOCK_SIZE_N"]),
-        triton.cdiv(a.shape[1], META["BLOCK_SIZE_M"]) + a.shape[0],
-        triton.cdiv(b.shape[1], META["BLOCK_SIZE_N"]),
     )
 
     grouped_gemm_masked_triton_kernel[grid](
         a,
         b,
         c,
-        a.shape[1],
-        b.shape[1],
-        b.shape[2],
         a.shape[1],
         b.shape[1],
         b.shape[2],

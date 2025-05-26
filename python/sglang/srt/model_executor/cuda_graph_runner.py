@@ -60,14 +60,6 @@ def get_is_capture_mode():
     return is_capture_mode
 
 
-# Detect whether the current forward pass is in capture mode
-is_capture_mode = False
-
-
-def get_is_capture_mode():
-    return is_capture_mode
-
-
 def _to_torch(model: torch.nn.Module, reverse: bool, num_tokens: int):
     for sub in model._modules.values():
         if isinstance(sub, CustomOp):
@@ -349,9 +341,7 @@ class CudaGraphRunner:
                     per_num_tokens in self.graphs
                     for per_num_tokens in forward_batch.global_num_tokens_cpu
                 )
-                if self.disable_padding
-                else max_num_tokens <= self.max_bs
-                else max_num_tokens <= self.max_bs
+                if self.disable_padding else max_num_tokens <= self.max_bs
             )
         else:
             is_bs_supported = (
