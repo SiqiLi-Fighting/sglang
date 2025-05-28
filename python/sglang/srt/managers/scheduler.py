@@ -542,6 +542,8 @@ class Scheduler(
     def init_metrics(self):
         self.last_gen_throughput: float = 0.0
         self.last_input_throughput: float = 0.0
+        self.last_input_throughput_schedule_time: float = 0.0
+        self.last_input_throughput_run_time: float = 0.0
         self.step_time_dict = defaultdict(list)  # Dict[batch size -> step time]
         self.spec_num_total_accepted_tokens = 0
         self.spec_num_total_forward_ct = 0
@@ -551,6 +553,7 @@ class Scheduler(
         if self.enable_metrics:
             engine_type = "unified"
             self.metrics_collector = SchedulerMetricsCollector(
+                self.tp_rank,
                 labels={
                     "model_name": self.server_args.served_model_name,
                     "engine_type": engine_type,
@@ -651,6 +654,8 @@ class Scheduler(
             else:
                 # When the server is idle, do self-check and re-init some states
                 self.check_memory()
+                if self.enable_metrics:
+                    self.reset_metrics()
                 self.new_token_ratio = self.init_new_token_ratio
 
             self.last_batch = batch
@@ -698,6 +703,8 @@ class Scheduler(
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
                 self.check_memory()
+                if self.enable_metrics:
+                    self.reset_metrics()
                 self.new_token_ratio = self.init_new_token_ratio
 
             self.last_batch = batch
@@ -803,6 +810,8 @@ class Scheduler(
             # When the server is idle, self-check and re-init some states
             if server_is_idle:
                 self.check_memory()
+                if self.enable_metrics:
+                    self.reset_metrics()
                 self.new_token_ratio = self.init_new_token_ratio
 
     def recv_requests(self) -> List[Req]:
@@ -1137,12 +1146,21 @@ class Scheduler(
         can_run_list: List[Req],
         running_bs: int,
     ):
+        schedule_batch_time = time.perf_counter()
+        if self.attn_tp_rank != 0:
+            # all gather stats
+            if self.enable_metrics:
+                self.metrics_collector.gather_stats(self.stats, self.dp_size, self.attn_tp_rank, self.attn_tp_size, self.tp_cpu_group)
+            return schedule_batch_time, 0
+
+        # only log stats for attn_tp_rank == 0
         gap_latency = time.perf_counter() - self.last_prefill_stats_tic
         self.last_prefill_stats_tic = time.perf_counter()
         self.last_input_throughput = self.num_prefill_tokens / gap_latency
         self.num_prefill_tokens = sum(
             [len(req.origin_input_ids) for req in can_run_list]
         )
+        num_prefill_tokens = self.num_prefill_tokens
 
         num_used = self.max_total_num_tokens - (
             self.token_to_kv_pool_allocator.available_size()
@@ -1185,12 +1203,20 @@ class Scheduler(
                 total_queue_latency += req.queue_time_end - req.queue_time_start
             self.stats.avg_request_queue_latency = total_queue_latency / num_new_seq
 
-            self.metrics_collector.log_stats(self.stats)
+            stats = self.metrics_collector.gather_stats(self.stats, self.dp_size, self.attn_tp_rank, self.attn_tp_size, self.tp_cpu_group)
+
+            self.metrics_collector.log_stats(stats)
         self._publish_kv_events()
+        return schedule_batch_time, num_prefill_tokens
 
     def log_decode_stats(
         self, can_run_cuda_graph: bool, running_batch: ScheduleBatch = None
     ):
+        if self.attn_tp_rank != 0:
+            if self.enable_metrics:
+                self.metrics_collector.gather_stats(self.stats, self.dp_size, self.attn_tp_rank, self.attn_tp_size, self.tp_cpu_group)
+            return
+
         batch = running_batch or self.running_batch
 
         gap_latency = time.perf_counter() - self.last_decode_stats_tic
@@ -1245,7 +1271,8 @@ class Scheduler(
             self.stats.num_queue_reqs = len(self.waiting_queue)
             self.stats.num_grammar_queue_reqs = len(self.grammar_queue)
             self.stats.spec_accept_length = spec_accept_length
-            self.metrics_collector.log_stats(self.stats)
+            stats = self.metrics_collector.gather_stats(self.stats, self.dp_size, self.attn_tp_rank, self.attn_tp_size, self.tp_cpu_group)
+            self.metrics_collector.log_stats(stats)
         self._publish_kv_events()
 
     def check_memory(self):
@@ -1276,25 +1303,29 @@ class Scheduler(
             )
             raise ValueError(msg)
 
-        if (
-            self.enable_metrics
-            and self.attn_tp_rank == 0
-            and time.perf_counter() > self.metrics_collector.last_log_time + 30
-        ):
-            # During idle time, also collect metrics every 30 seconds.
-            num_used = self.max_total_num_tokens - (
-                self.token_to_kv_pool_allocator.available_size()
-                + self.tree_cache.evictable_size()
-            )
-            num_running_reqs = len(self.running_batch.reqs)
-            self.stats.num_running_reqs = num_running_reqs
-            self.stats.num_used_tokens = num_used
-            self.stats.token_usage = num_used / self.max_total_num_tokens
-            self.stats.gen_throughput = 0
-            self.stats.num_queue_reqs = len(self.waiting_queue)
-            self.stats.num_grammar_queue_reqs = len(self.grammar_queue)
-            self.metrics_collector.log_stats(self.stats)
         self._publish_kv_events()
+
+    def reset_metrics(self):
+        if self.attn_tp_rank != 0:
+            self.metrics_collector.gather_stats(self.stats, self.dp_size, self.attn_tp_rank, self.attn_tp_size, self.tp_cpu_group)
+            return
+
+        # During idle time, also collect metrics every 30 seconds.
+        num_used = self.max_total_num_tokens - (
+            self.token_to_kv_pool_allocator.available_size()
+            + self.tree_cache.evictable_size()
+        )
+        num_running_reqs = len(self.running_batch.reqs)
+        self.stats.num_running_reqs = num_running_reqs
+        self.stats.num_used_tokens = num_used
+        self.stats.token_usage = num_used / self.max_total_num_tokens
+        self.stats.gen_throughput = 0
+        self.stats.input_throughput_schedule_time = 0
+        self.stats.input_throughput_run_time = 0
+        self.stats.num_queue_reqs = len(self.waiting_queue)
+        self.stats.num_grammar_queue_reqs = len(self.grammar_queue)
+        stats = self.metrics_collector.gather_stats(self.stats, self.dp_size, self.attn_tp_rank, self.attn_tp_size, self.tp_cpu_group)
+        self.metrics_collector.log_stats(stats)
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         # Merge the prefill batch into the running batch
@@ -1469,8 +1500,7 @@ class Scheduler(
             self.chunked_req.is_chunked += 1
 
         # Print stats
-        if self.attn_tp_rank == 0:
-            self.log_prefill_stats(adder, can_run_list, running_bs)
+        schedule_batch_time, num_prefill_tokens = self.log_prefill_stats(adder, can_run_list, running_bs)
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(
@@ -1483,6 +1513,8 @@ class Scheduler(
             self.spec_algorithm,
             self.server_args.enable_custom_logit_processor,
             chunked_req=self.chunked_req,
+            schedule_batch_time=schedule_batch_time,
+            num_prefill_tokens=num_prefill_tokens,
         )
         new_batch.prepare_for_extend()
 
@@ -1547,6 +1579,7 @@ class Scheduler(
         self, batch: ScheduleBatch
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
+        batch.run_batch_time = time.perf_counter()
         self.forward_ct += 1
 
         # Check profiler
@@ -1633,12 +1666,18 @@ class Scheduler(
             self.process_batch_result_decode(batch, result, launch_done)
         elif batch.forward_mode.is_extend():
             self.process_batch_result_prefill(batch, result, launch_done)
+            if self.enable_metrics:
+                self.reset_metrics()
         elif batch.forward_mode.is_idle():
             if self.enable_overlap:
                 self.tp_worker.resolve_last_batch_result(launch_done)
                 self.set_next_batch_sampling_info_done(batch)
+            if self.enable_metrics:
+                self.reset_metrics()
         elif batch.forward_mode.is_dummy_first():
             self.set_next_batch_sampling_info_done(batch)
+            if self.enable_metrics:
+                self.reset_metrics()
 
         if self.return_health_check_ct:
             # Return some signal for the health check.
