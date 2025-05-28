@@ -470,13 +470,18 @@ class SchedulerDisaggregationDecodeMixin:
                     )
                     if prepare_dp_attn_flag:
                         self._prepare_idle_batch_and_run(None)
+                    if self.enable_metrics:
+                        self.reset_metrics()
                 else:
                     if prepare_dp_attn_flag:
                         self.prepare_dp_attn_batch(batch)
                     result = self.run_batch(batch)
                     self.process_batch_result(batch, result)
-            elif prepare_dp_attn_flag:
-                batch, _ = self._prepare_idle_batch_and_run(None)
+            else:
+                if prepare_dp_attn_flag:
+                    batch, _ = self._prepare_idle_batch_and_run(None)
+                if self.enable_metrics:
+                    self.reset_metrics()
 
             if batch is None and (
                 len(self.disagg_decode_transfer_queue.queue)
@@ -555,6 +560,9 @@ class SchedulerDisaggregationDecodeMixin:
                     self.tp_worker.cur_sampling_info if batch else None
                 )
                 self.process_batch_result(tmp_batch, tmp_result)
+            else:
+                if self.enable_metrics:
+                    self.reset_metrics()
 
             if batch is None and (
                 len(self.disagg_decode_transfer_queue.queue)
@@ -656,3 +664,5 @@ class SchedulerDisaggregationDecodeMixin:
             self.disagg_decode_transfer_queue.pop_transferred()
         )  # the requests which kv has arrived
         self.waiting_queue.extend(alloc_reqs)
+        self.stats.num_decode_prealloc_queue_reqs = len(self.disagg_decode_prealloc_queue.queue)
+        self.stats.num_decode_transfer_queue_reqs = len(self.disagg_decode_transfer_queue.queue)

@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
     from sglang.srt.managers.scheduler import GenerationBatchResult, Scheduler
     from sglang.srt.mem_cache.memory_pool import KVCache
-
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -220,8 +220,11 @@ class SchedulerDisaggregationPrefillMixin:
             self.waiting_queue.extend(
                 self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
             )
+            self.stats.num_prefill_prealloc_queue_reqs = len(self.disagg_prefill_bootstrap_queue.queue)
             self.process_prefill_chunk()
             batch = self.get_new_batch_prefill()
+            if batch is None and self.enable_metrics:
+                self.reset_metrics()
 
             # Handle DP attention
             if (
@@ -238,6 +241,7 @@ class SchedulerDisaggregationPrefillMixin:
 
             if len(self.disagg_prefill_inflight_queue) > 0:
                 self.process_disagg_prefill_inflight_queue()
+            self.stats.num_prefill_infight_queue_reqs = len(self.disagg_prefill_inflight_queue)
 
             if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
                 self.check_memory()
@@ -258,8 +262,11 @@ class SchedulerDisaggregationPrefillMixin:
             self.waiting_queue.extend(
                 self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
             )
+            self.stats.num_prefill_prealloc_queue_reqs = len(self.disagg_prefill_bootstrap_queue.queue)
             self.process_prefill_chunk()
             batch = self.get_new_batch_prefill()
+            if batch is None and self.enable_metrics:
+                self.reset_metrics()
 
             # Handle DP attention
             if (
@@ -290,6 +297,7 @@ class SchedulerDisaggregationPrefillMixin:
 
             if len(self.disagg_prefill_inflight_queue) > 0:
                 self.process_disagg_prefill_inflight_queue()
+            self.stats.num_prefill_infight_queue_reqs = len(self.disagg_prefill_inflight_queue)
 
             if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
                 self.check_memory()
@@ -340,6 +348,19 @@ class SchedulerDisaggregationPrefillMixin:
                     logits_output.input_token_logprobs = tuple(
                         logits_output.input_token_logprobs.tolist()
                     )
+
+        if self.attn_tp_rank == 0:
+            process_result_time = time.perf_counter()
+            self.last_input_throughput_schedule_time = batch.num_prefill_tokens / (process_result_time - batch.schedule_batch_time)
+            self.last_input_throughput_run_time = batch.num_prefill_tokens / (process_result_time - batch.run_batch_time)
+            logger.info(f"Prefill batch. "
+                        f"#input tokens: {batch.num_prefill_tokens}, "
+                        f"#input throughput(schedule_time): {self.last_input_throughput_schedule_time:.2f}, "
+                        f"#input throughput(run_time): {self.last_input_throughput_run_time:.2f}")
+        if self.enable_metrics:
+            self.stats.input_throughput_schedule_time = self.last_input_throughput_schedule_time
+            self.stats.input_throughput_run_time = self.last_input_throughput_run_time
+
         for i, (req, next_token_id) in enumerate(
             zip(batch.reqs, next_token_ids, strict=True)
         ):
