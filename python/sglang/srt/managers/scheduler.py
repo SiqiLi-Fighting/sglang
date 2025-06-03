@@ -1148,7 +1148,7 @@ class Scheduler(
         self.last_prefill_stats_tic = time.perf_counter()
         self.last_input_throughput = self.num_prefill_tokens / gap_latency
         self.num_prefill_tokens = sum(
-            [len(req.origin_input_ids) for req in can_run_list]
+            [req.extend_input_len if req.is_chunked else len(req.origin_input_ids) for req in can_run_list]
         )
         num_prefill_tokens = self.num_prefill_tokens
 
@@ -1192,7 +1192,7 @@ class Scheduler(
             for req in can_run_list:
                 total_queue_latency += req.queue_time_end - req.queue_time_start
             self.stats.avg_request_queue_latency = total_queue_latency / num_new_seq
-        
+
         self._publish_kv_events()
         return schedule_batch_time, num_prefill_tokens
 
@@ -1283,7 +1283,7 @@ class Scheduler(
                 f"total_size={self.req_to_token_pool.size}\n"
             )
             raise ValueError(msg)
-        
+
         if (
             self.enable_metrics
             and self.attn_tp_rank == 0
