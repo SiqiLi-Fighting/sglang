@@ -22,7 +22,9 @@ from sglang.srt.utils import get_bool_env_var
 
 SGLANG_TEST_REQUEST_TIME_STATS = get_bool_env_var("SGLANG_TEST_REQUEST_TIME_STATS")
 import torch
+import logging
 
+logger = logging.getLogger(__name__)
 @dataclass
 class TimeStats:
     """
@@ -602,13 +604,14 @@ class TokenizerMetricsCollector:
     def observe_time_to_first_token(self, value: float):
         self.histogram_time_to_first_token.labels(**self.labels).observe(value)
 
-    def observe_inter_token_latency(self, internval: float, num_new_tokens: int):
-        adjusted_interval = internval / num_new_tokens
+    def observe_inter_token_latency(self, interval: float, num_new_tokens: int):
+        logger.info(f"observe TPOT: interval: {interval}, num_new_tokens: {num_new_tokens}")
+        adjusted_interval = interval / num_new_tokens
 
         # A faster version of the Histogram::observe which observes multiple values at the same time.
         # reference: https://github.com/prometheus/client_python/blob/v0.21.1/prometheus_client/metrics.py#L639
         his = self.histogram_inter_token_latency_seconds.labels(**self.labels)
-        his._sum.inc(internval)
+        his._sum.inc(interval)
 
         for i, bound in enumerate(his._upper_bounds):
             if adjusted_interval <= bound:

@@ -1343,6 +1343,8 @@ class TokenizerManager:
             else 0
         )
 
+        logger.info(f"collect_metrics: {state.first_token_time=} {state.last_time=} {state.last_completion_tokens=} {completion_tokens=}")
+
         if state.first_token_time == 0.0:
             state.first_token_time = state.last_time = time.time()
             state.last_completion_tokens = completion_tokens
