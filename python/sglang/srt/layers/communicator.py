@@ -131,6 +131,7 @@ class LayerCommunicator:
         layer_scatter_modes: LayerScatterModes,
         input_layernorm: torch.nn.Module,
         post_attention_layernorm: torch.nn.Module,
+        is_nextn: bool = False,
     ):
         self.layer_scatter_modes = layer_scatter_modes
         self.input_layernorm = input_layernorm
@@ -173,6 +174,7 @@ class LayerCommunicator:
                 residual_input_mode=self.layer_scatter_modes.middle_residual_mode,
                 output_mode=self.layer_scatter_modes.layer_output_mode,
                 context=self._context,
+                is_nextn=is_nextn,
             )
         )
 
@@ -218,7 +220,15 @@ class LayerCommunicator:
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         forward_batch: ForwardBatch,
+        is_nextn: bool = False,
     ):
+        logger.info(
+            f"1111-----------_communicate_summable_tensor_pair_fn {self._communicate_summable_tensor_pair_fn}"
+        )
+        if is_nextn:
+            logger.info(
+                f"nextn11111--------------_communicate_summable_tensor_pair_fn {self._communicate_summable_tensor_pair_fn}"
+            )
         return self._communicate_summable_tensor_pair_fn(
             hidden_states=hidden_states,
             residual=residual,
@@ -395,9 +405,10 @@ class _CommunicateSummableTensorPairFn:
         residual_input_mode: ScatterMode,
         output_mode: ScatterMode,
         context: _Context,
+        is_nextn: bool = False,
     ):
-        """It is allowed to make (hidden_states, residual) := (hidden_states + residual, None) if needed."""
-
+        if is_nextn:
+            return _CommunicateSummableTensorPairFn._gather
         if context.is_same_group_size(
             hidden_states_input_mode, output_mode
         ) and context.is_same_group_size(residual_input_mode, output_mode):
