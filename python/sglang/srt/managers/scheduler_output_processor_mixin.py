@@ -267,7 +267,7 @@ class SchedulerOutputProcessorMixin:
                 req.grammar.finished = req.finished()
 
         self.set_next_batch_sampling_info_done(batch)
-        self.stream_output(batch.reqs, batch.return_logprob) # process decode output
+        self.stream_output(batch.reqs, batch.return_logprob)
         self.token_to_kv_pool_allocator.free_group_end()
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
@@ -517,7 +517,6 @@ class SchedulerOutputProcessorMixin:
                 req.finished_output = True
                 should_output = True
             else:
-                # not stream, every 50 output once
                 if req.stream:
                     stream_interval = (
                         req.sampling_params.stream_interval or self.stream_interval
@@ -647,7 +646,7 @@ class SchedulerOutputProcessorMixin:
         if rids:
             if self.model_config.is_multimodal_gen:
                 return
-            # send to detokenizer
+
             self.send_to_detokenizer.send_pyobj(
                 BatchTokenIDOut(
                     rids,

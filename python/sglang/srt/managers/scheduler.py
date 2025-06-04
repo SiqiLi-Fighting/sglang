@@ -354,6 +354,7 @@ class Scheduler(
         self.last_batch: Optional[ScheduleBatch] = None
         self.forward_ct = 0
         self.forward_ct_decode = 0
+        self.schedule_ct = 0
         self.num_generated_tokens = 0
         self.num_prefill_tokens = 0
         self.last_decode_stats_tic = time.perf_counter()
@@ -554,6 +555,7 @@ class Scheduler(
             engine_type = "unified"
             self.metrics_collector = SchedulerMetricsCollector(
                 tp_rank=self.tp_rank,
+                dp_size=self.dp_size,
                 labels={
                     "model_name": self.server_args.served_model_name,
                     "engine_type": engine_type,
@@ -657,8 +659,9 @@ class Scheduler(
                 self.new_token_ratio = self.init_new_token_ratio
 
             self.last_batch = batch
-            self.log_stats()
-
+            self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
+            if self.schedule_ct % 10 == 0:
+                self.log_stats()
     @DynamicGradMode()
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
@@ -705,8 +708,9 @@ class Scheduler(
                 self.new_token_ratio = self.init_new_token_ratio
 
             self.last_batch = batch
-            self.log_stats()
-
+            self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
+            if self.schedule_ct % 10 == 0:
+                self.log_stats()
     @DynamicGradMode()
     def event_loop_pp(self):
         """A non-overlap scheduler loop for pipeline parallelism."""
@@ -809,7 +813,9 @@ class Scheduler(
             if server_is_idle:
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
-            self.log_stats()
+            self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
+            if self.schedule_ct % 10 == 0:
+                self.log_stats()
 
     def recv_requests(self) -> List[Req]:
         """Receive results at tp_rank = 0 and broadcast it to all other TP ranks."""

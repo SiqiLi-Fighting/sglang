@@ -246,10 +246,13 @@ class SchedulerDisaggregationPrefillMixin:
                 self.new_token_ratio = self.init_new_token_ratio
 
             self.last_batch = batch
-            self.log_stats()
             # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
             # Otherwise, it hangs under high concurrency
             self.running_batch.batch_is_full = False
+
+            self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
+            if self.schedule_ct % 10 == 0:
+                self.log_stats()
 
     @torch.no_grad()
     def event_loop_overlap_disagg_prefill(self: Scheduler):
@@ -304,7 +307,9 @@ class SchedulerDisaggregationPrefillMixin:
             # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
             # Otherwise, it hangs under high concurrency
             self.running_batch.batch_is_full = False
-            self.log_stats()
+            self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
+            if self.schedule_ct % 10 == 0:
+                self.log_stats()
 
     def process_batch_result_disagg_prefill(
         self: Scheduler,
@@ -358,7 +363,7 @@ class SchedulerDisaggregationPrefillMixin:
             if self.enable_metrics:
                 self.stats.input_throughput_schedule_time = self.last_input_throughput_schedule_time
                 self.stats.input_throughput_run_time = self.last_input_throughput_run_time
-        
+
         for i, (req, next_token_id) in enumerate(
             zip(batch.reqs, next_token_ids, strict=True)
         ):

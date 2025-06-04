@@ -9,7 +9,6 @@ import random
 import urllib
 from itertools import chain
 from typing import List, Optional
-from utils import add_prometheus_middleware
 
 import aiohttp
 import orjson
@@ -20,7 +19,7 @@ from prometheus_client import Counter, Histogram, Summary
 from typing import Callable
 import time
 
-from sglang.srt.disaggregation.utils import PDRegistryRequest
+from sglang.srt.disaggregation.utils import PDRegistryRequest, add_prometheus_middleware
 
 
 def setup_logger():
@@ -56,7 +55,7 @@ class GenerationMetrics:
             'Total number of generation requests',
             ['endpoint', 'status']
         )
-        
+
         # 请求延迟直方图
         self.request_latency = Histogram(
             'sglang_lb_request_duration_seconds',
@@ -64,40 +63,15 @@ class GenerationMetrics:
             ['endpoint'],
             buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
         )
-        
-        # 生成token数量统计
-        self.generated_tokens = Counter(
-            'sglang_lb_generated_tokens_total',
-            'Total number of generated tokens',
-            ['endpoint']
+
+        # 请求token间平均延迟
+        self.request_token_latency = Histogram(
+            'sglang_lb_request_token_latency_seconds',
+            'Request token latency in seconds',
+            ['endpoint'],
+            buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
         )
-        
-        # 请求队列大小
-        self.queue_size = Gauge(
-            'sglang_lb_queue_size',
-            'Current size of request queue',
-            ['server_type']  # prefill or decode
-        )
-        
-        # 添加token统计相关的metrics
-        self.prompt_tokens = Counter(
-            'sglang_lb_prompt_tokens_total',
-            'Total number of prompt tokens processed',
-            ['endpoint']
-        )
-        
-        self.completion_tokens = Counter(
-            'sglang_lb_completion_tokens_total',
-            'Total number of completion tokens generated',
-            ['endpoint']
-        )
-        
-        self.cached_tokens = Counter(
-            'sglang_lb_cached_tokens_total',
-            'Total number of cached tokens',
-            ['endpoint']
-        )
-        
+
         # 添加token处理速率
         self.token_throughput = Histogram(
             'sglang_lb_token_throughput',
@@ -111,23 +85,18 @@ metrics = GenerationMetrics()
 
 
 class MiniLoadBalancer:
-    def __init__(self, prefill_configs: List[PrefillConfig], decode_servers: List[str]):
+    def __init__(self, prefill_configs: List[PrefillConfig], decode_servers: List[str], enable_metrics: bool):
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
-
-        # 更新队列大小metrics
-        metrics.queue_size.labels(server_type="prefill").set(len(prefill_configs))
-        metrics.queue_size.labels(server_type="decode").set(len(decode_servers))
+        self.enable_metrics = enable_metrics
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
         self.prefill_servers.append(new_prefill_config.url)
-        metrics.queue_size.labels(server_type="prefill").inc()
 
     def add_decode_server(self, new_decode_server: str):
         self.decode_servers.append(new_decode_server)
-        metrics.queue_size.labels(server_type="decode").inc()
 
     def select_pair(self):
         # TODO: return some message instead of panic
@@ -148,6 +117,7 @@ class MiniLoadBalancer:
                 total=3600
             )  # Add timeout for request reliability
         ) as session:
+            start_time = time.perf_counter()
             tasks = [
                 session.post(f"{prefill_server}/{endpoint}", json=modified_request),
                 session.post(f"{decode_server}/{endpoint}", json=modified_request),
@@ -170,6 +140,37 @@ class MiniLoadBalancer:
                         )
             else:
                 ret_json = await decode_response.json()
+            if self.enable_metrics:
+                if endpoint == "generate" and "meta_info" in ret_json:
+                    elapsed = time.perf_counter() - start_time
+                    metrics.request_latency.labels(endpoint=endpoint).observe(elapsed)
+                    if "prompt_tokens" in ret_json["meta_info"]:
+                        prompt_throughput = ret_json["meta_info"].get("prompt_tokens", 0) / elapsed
+                        metrics.token_throughput.labels(
+                            endpoint=endpoint,
+                            token_type="prompt"
+                        ).observe(prompt_throughput)
+                    if "completion_tokens" in ret_json["meta_info"]:
+                        completion_throughput = ret_json["meta_info"].get("completion_tokens", 0) / elapsed
+                        metrics.token_throughput.labels(
+                            endpoint=endpoint,
+                            token_type="completion"
+                        ).observe(completion_throughput)
+                elif endpoint == "v1/chat/completions" and "usage" in ret_json:
+                    elapsed = time.perf_counter() - start_time
+                    metrics.request_latency.labels(endpoint=endpoint).observe(elapsed)
+                    if "prompt_tokens" in ret_json["usage"]:
+                        prompt_throughput = ret_json["usage"].get("prompt_tokens", 0) / elapsed
+                        metrics.token_throughput.labels(
+                            endpoint=endpoint,
+                            token_type="prompt"
+                        ).observe(prompt_throughput)
+                    if "completion_tokens" in ret_json["usage"]:
+                        completion_throughput = ret_json["usage"].get("completion_tokens", 0) / elapsed
+                        metrics.token_throughput.labels(
+                            endpoint=endpoint,
+                            token_type="completion"
+                        ).observe(completion_throughput)
 
             return ORJSONResponse(
                 content=ret_json,
@@ -435,175 +436,10 @@ async def register(obj: PDRegistryRequest):
 
 def run(prefill_configs, decode_addrs, host, port, enable_metrics):
     global load_balancer
-    load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs)
+    load_balancer = MiniLoadBalancer(prefill_configs, decode_addrs, enable_metrics)
     if enable_metrics:
         add_prometheus_middleware(app)
     uvicorn.run(app, host=host, port=port)
-
-
-@app.middleware("http")
-async def metrics_middleware(request: Request, call_next: Callable):
-    start_time = time.perf_counter()
-    endpoint = request.url.path
-    
-    try:
-        response = await call_next(request)
-        
-        if response.status_code == 200:
-            if endpoint == "/generate":
-                await process_generate_response(response, endpoint, start_time)
-            elif endpoint == "/v1/chat/completions":
-                await process_chat_completion_response(response, endpoint, start_time)
-                    
-        return response
-        
-    except Exception as e:
-        metrics.request_counter.labels(
-            endpoint=endpoint,
-            status=500
-        ).inc()
-        raise e
-
-async def process_chat_completion_response(response, endpoint, start_time):
-    if "text/event-stream" in response.headers.get("content-type", ""):
-        original_iterator = response.body_iterator
-        
-        async def wrapped_iterator():
-            async for chunk in original_iterator:
-                if chunk.startswith(b"data: "):
-                    try:
-                        data = orjson.loads(chunk[6:].strip())
-                        if "usage" in data:
-                            usage = data["usage"]
-                            # 统计token数量
-                            metrics.prompt_tokens.labels(endpoint=endpoint).inc(
-                                usage.get("prompt_tokens", 0)
-                            )
-                            metrics.completion_tokens.labels(endpoint=endpoint).inc(
-                                usage.get("completion_tokens", 0)
-                            )
-                            
-                            # 计算吞吐量
-                            elapsed = time.perf_counter() - start_time
-                            if elapsed > 0:
-                                prompt_throughput = usage.get("prompt_tokens", 0) / elapsed
-                                completion_throughput = usage.get("completion_tokens", 0) / elapsed
-                                
-                                metrics.token_throughput.labels(
-                                    endpoint=endpoint,
-                                    token_type="prompt"
-                                ).observe(prompt_throughput)
-                                
-                                metrics.token_throughput.labels(
-                                    endpoint=endpoint,
-                                    token_type="completion"
-                                ).observe(completion_throughput)
-                    except Exception as e:
-                        logger.error(f"Error processing chat completion streaming response: {e}")
-                yield chunk
-        
-        response.body_iterator = wrapped_iterator()
-    else:
-        # 处理非流式响应
-        try:
-            body = await response.json()
-            if "usage" in body:
-                usage = body["usage"]
-                # 统计token数量
-                metrics.prompt_tokens.labels(endpoint=endpoint).inc(
-                    usage.get("prompt_tokens", 0)
-                )
-                metrics.completion_tokens.labels(endpoint=endpoint).inc(
-                    usage.get("completion_tokens", 0)
-                )
-                
-                # 计算吞吐量
-                elapsed = time.perf_counter() - start_time
-                if elapsed > 0:
-                    prompt_throughput = usage.get("prompt_tokens", 0) / elapsed
-                    completion_throughput = usage.get("completion_tokens", 0) / elapsed
-                    
-                    metrics.token_throughput.labels(
-                        endpoint=endpoint,
-                        token_type="prompt"
-                    ).observe(prompt_throughput)
-                    
-                    metrics.token_throughput.labels(
-                        endpoint=endpoint,
-                        token_type="completion"
-                    ).observe(completion_throughput)
-        except Exception as e:
-            logger.error(f"Error processing chat completion response: {e}")
-
-async def process_generate_response(response, endpoint, start_time):
-    if "text/event-stream" in response.headers.get("content-type", ""):
-        original_iterator = response.body_iterator
-        
-        async def wrapped_iterator():
-            async for chunk in original_iterator:
-                if chunk.startswith(b"data: "):
-                    try:
-                        data = orjson.loads(chunk[6:].strip())
-                        if "meta_info" in data:
-                            meta_info = data["meta_info"]
-                            # 统计token数量
-                            metrics.prompt_tokens.labels(endpoint=endpoint).inc(
-                                meta_info.get("prompt_tokens", 0)
-                            )
-                            metrics.completion_tokens.labels(endpoint=endpoint).inc(
-                                meta_info.get("completion_tokens", 0)
-                            )
-                            metrics.cached_tokens.labels(endpoint=endpoint).inc(
-                                meta_info.get("cached_tokens", 0)
-                            )
-                            elapsed = time.perf_counter() - start_time
-                            if elapsed > 0:
-                                prompt_throughput = meta_info.get("prompt_tokens", 0) / elapsed
-                                completion_throughput = meta_info.get("completion_tokens", 0) / elapsed
-                                
-                                metrics.token_throughput.labels(
-                                    endpoint=endpoint,
-                                    token_type="prompt"
-                                ).observe(prompt_throughput)
-                                metrics.token_throughput.labels(
-                                    endpoint=endpoint,
-                                    token_type="completion"
-                                ).observe(completion_throughput)
-                    except Exception as e:
-                        logger.error(f"Error processing streaming response: {e}")                    
-    else:
-        try:
-            body = await response.json()
-            if "meta_info" in body:
-                meta_info = body["meta_info"]
-                # 统计token数量
-                metrics.prompt_tokens.labels(endpoint=endpoint).inc(
-                    meta_info.get("prompt_tokens", 0)
-                )
-                metrics.completion_tokens.labels(endpoint=endpoint).inc(
-                    meta_info.get("completion_tokens", 0)
-                )
-                metrics.cached_tokens.labels(endpoint=endpoint).inc(
-                    meta_info.get("cached_tokens", 0)
-                )
-                
-                # 计算吞吐量
-                elapsed = time.perf_counter() - start_time
-                if elapsed > 0:
-                    prompt_throughput = meta_info.get("prompt_tokens", 0) / elapsed
-                    completion_throughput = meta_info.get("completion_tokens", 0) / elapsed
-                    
-                    metrics.token_throughput.labels(
-                        endpoint=endpoint,
-                        token_type="prompt"
-                    ).observe(prompt_throughput)
-                    metrics.token_throughput.labels(
-                        endpoint=endpoint,
-                        token_type="completion"
-                    ).observe(completion_throughput)
-        except Exception as e:
-            logger.error(f"Error processing non-streaming response: {e}")
-                    
 
 if __name__ == "__main__":
     import argparse
