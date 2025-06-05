@@ -223,21 +223,17 @@ class LayerCommunicator:
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         forward_batch: ForwardBatch,
-        is_nextn: bool = False,
     ):
+
         logger.info(
-            f"1111-----------_communicate_summable_tensor_pair_fn {self._communicate_summable_tensor_pair_fn}"
+            f"nextn11111--------------_communicate_summable_tensor_pair_fn {self._communicate_summable_tensor_pair_fn}"
         )
-        if is_nextn:
-            logger.info(
-                f"nextn11111--------------_communicate_summable_tensor_pair_fn {self._communicate_summable_tensor_pair_fn}"
-            )
-            logger.info(
-                f"hidden_states_input_mode={self.layer_scatter_modes.attn_mode},"
-                f"residual_input_mode={self.layer_scatter_modes.layer_input_mode},"
-                f"hidden_states_output_mode={self.layer_scatter_modes.mlp_mode},"
-                f"residual_output_mode={self.layer_scatter_modes.middle_residual_mode},"
-            )
+        logger.info(
+            f"hidden_states_input_mode={self.layer_scatter_modes.attn_mode},"
+            f"residual_input_mode={self.layer_scatter_modes.layer_input_mode},"
+            f"hidden_states_output_mode={self.layer_scatter_modes.mlp_mode},"
+            f"residual_output_mode={self.layer_scatter_modes.middle_residual_mode},"
+        )
         return self._communicate_summable_tensor_pair_fn(
             hidden_states=hidden_states,
             residual=residual,
