@@ -112,47 +112,7 @@ class DeepseekModelNextN(nn.Module):
         )
 
         if not forward_batch.forward_mode.is_idle():
-            debug_info = ""
-            debug_info += f"DEBUG: About to call norm, residual is {'None' if residual is None else 'not None'}"
-            debug_info += (
-                f"DEBUG: self.shared_head.norm type: {type(self.shared_head.norm)}"
-            )
-            debug_info += (
-                f"DEBUG: self.shared_head.norm class: {self.shared_head.norm.__class__}"
-            )
-            debug_info += f"DEBUG: self.shared_head.norm.__class__.__name__: {self.shared_head.norm.__class__.__name__}"
-            debug_info += (
-                f"DEBUG: hasattr forward: {hasattr(self.shared_head.norm, 'forward')}"
-            )
-            if hasattr(self.shared_head.norm, "forward"):
-                debug_info += f"DEBUG: forward method: {self.shared_head.norm.forward}"
-            try:
-                result = self.shared_head.norm(hidden_states, residual)
-                debug_info += (
-                    f"DEBUG: result type: {type(result)}, "
-                    f"result value: {result}, "
-                    f"result is tuple: {isinstance(result, tuple)}, "
-                    f"result is list: {isinstance(result, list)}"
-                )
-                if hasattr(result, "__len__"):
-                    debug_info += f", result length: {len(result)}"
-                logger.info(debug_info)
-                logger.info(f"DEBUG: norm returned type: {type(result)}")
-                if isinstance(result, (tuple, list)):
-                    logger.info(f"DEBUG: norm returned {len(result)} values")
-                    for i, item in enumerate(result):
-                        logger.info(
-                            f"DEBUG: result[{i}] type: {type(item)}, shape: {getattr(item, 'shape', 'no shape')}"
-                        )
-                else:
-                    logger.info(f"DEBUG: norm returned single value: {type(result)}")
-                hidden_states = result
-            except Exception as e:
-                logger.error(f"DEBUG: Exception in norm call: {e}")
-                import traceback
-
-                logger.error(f"DEBUG: Full traceback: {traceback.format_exc()}")
-                raise
+            hidden_states = self.shared_head.norm(hidden_states, residual)
         return hidden_states
 
 
