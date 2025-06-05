@@ -421,7 +421,7 @@ class DeepseekV2MoE(nn.Module):
         return final_hidden_states
 
     def _forward_shared_experts(self, hidden_states):
-        if self.n_share_experts_fusion == 0:
+        if self.num_fused_shared_experts == 0:
             return self.shared_experts(hidden_states)
         else:
             return None
@@ -1435,7 +1435,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             layer_scatter_modes=self.layer_scatter_modes,
             input_layernorm=self.input_layernorm,
             post_attention_layernorm=self.post_attention_layernorm,
-            is_nextn=self.is_nextn,
         )
 
     def _is_layer_sparse(self, layer_id: int, is_nextn: bool) -> bool:
@@ -2143,7 +2142,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                         )
                         weight_loader(param, loaded_weight)
 
-        self.post_load_weights(is_nextn=is_nextn, weight_names=weight_names)
+        self.post_load_weights(is_nextn=is_nextn)
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight
