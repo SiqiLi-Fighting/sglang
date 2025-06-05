@@ -144,7 +144,7 @@ class DeepseekModelNextN(nn.Module):
                         )
                 else:
                     logger.info(f"DEBUG: norm returned single value: {type(result)}")
-                hidden_states, _ = result
+                hidden_states = result
             except Exception as e:
                 logger.error(f"DEBUG: Exception in norm call: {e}")
                 import traceback
