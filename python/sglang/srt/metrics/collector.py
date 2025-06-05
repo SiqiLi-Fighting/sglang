@@ -151,12 +151,13 @@ class SchedulerStats:
 
 class SchedulerMetricsCollector:
 
-    def __init__(self, tp_rank: int, labels: Dict[str, str]) -> None:
+    def __init__(self, tp_rank: int, dp_size: int, labels: Dict[str, str]) -> None:
         # We need to import prometheus_client after setting the env variable `PROMETHEUS_MULTIPROC_DIR`
         from prometheus_client import Counter, Gauge
 
         self.labels = labels
         self.tp_rank = tp_rank
+        self.dp_size = dp_size
         self.last_log_time = time.perf_counter()
 
         labelnames_dp = list(labels.keys())
@@ -280,10 +281,31 @@ class SchedulerMetricsCollector:
             labelnames=labels.keys(),
         )
 
-    def _log_gauge_with_dp(self, gauge, data: Union[int, float], dp: int) -> None:
-        labels = self.labels.copy()
-        labels["dp"] = str(dp)
-        gauge.labels(**labels).set(data)
+        self._labeled_gauges = {}
+        for dp in range(dp_size):
+            dp_labels = labels.copy()
+            dp_labels["dp"] = str(dp)
+            
+            self._labeled_gauges[dp] = {
+                'num_running_reqs': self.num_running_reqs.labels(**dp_labels),
+                'num_used_tokens': self.num_used_tokens.labels(**dp_labels),
+                'token_usage': self.token_usage.labels(**dp_labels),
+                'gen_throughput': self.gen_throughput.labels(**dp_labels),
+                'num_queue_reqs': self.num_queue_reqs.labels(**dp_labels),
+                'cache_hit_rate': self.cache_hit_rate.labels(**dp_labels),
+                'num_grammar_queue_reqs': self.num_grammar_queue_reqs.labels(**dp_labels),
+                'spec_accept_length': self.spec_accept_length.labels(**dp_labels),
+                'avg_request_queue_latency': self.avg_request_queue_latency.labels(**dp_labels),
+                'input_throughput_schedule_time': self.input_throughput_schedule_time.labels(**dp_labels),
+                'input_throughput_run_time': self.input_throughput_run_time.labels(**dp_labels),
+                'num_prefill_prealloc_queue_reqs': self.num_prefill_prealloc_queue_reqs.labels(**dp_labels),
+                'num_prefill_infight_queue_reqs': self.num_prefill_infight_queue_reqs.labels(**dp_labels),
+                'num_decode_prealloc_queue_reqs': self.num_decode_prealloc_queue_reqs.labels(**dp_labels),
+                'num_decode_transfer_queue_reqs': self.num_decode_transfer_queue_reqs.labels(**dp_labels),
+            }
+
+    def _log_gauge_with_dp(self, gauge, data: Union[int, float], labels: Dict[str, str]) -> None:
+        gauge.labels(labels).set(data)
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
@@ -294,44 +316,6 @@ class SchedulerMetricsCollector:
 
     def increment_transfer_failed_reqs(self) -> None:
         self.num_transfer_failed_reqs.labels(**self.labels).inc(1)
-
-    # TODO: refactor all gather
-    def gather_stats(self, stats: SchedulerStats, dp_size: int, attn_tp_rank: int, attn_tp_size: int, tp_cpu_group) -> List[SchedulerStats]:
-        if attn_tp_rank != 0:
-            local_info = torch.zeros(15, dtype=torch.float32)
-        else:
-            local_info = self._stats_to_tensor(stats)
-            if local_info.size(0) != 15:
-                raise ValueError(f"local_info.size(0) != 15: {local_info.size(0)}")
-        global_info = torch.empty(
-            (dp_size, attn_tp_size, 15),
-            dtype=torch.float32
-        )
-        torch.distributed.all_gather_into_tensor(
-            global_info.flatten(),
-            local_info,
-            group=tp_cpu_group,
-        )
-        res = [
-            SchedulerStats(
-                num_running_reqs=int(global_info[i][0][0]),
-                num_used_tokens=int(global_info[i][0][1]),
-                token_usage=global_info[i][0][2],
-                num_queue_reqs=int(global_info[i][0][3]),
-                cache_hit_rate=global_info[i][0][4],
-                avg_request_queue_latency=global_info[i][0][5],
-                gen_throughput=global_info[i][0][6],
-                num_grammar_queue_reqs=int(global_info[i][0][7]),
-                spec_accept_length=global_info[i][0][8],
-                input_throughput_schedule_time=global_info[i][0][9],
-                input_throughput_run_time=global_info[i][0][10],
-                num_prefill_prealloc_queue_reqs=int(global_info[i][0][11]),
-                num_prefill_infight_queue_reqs=int(global_info[i][0][12]),
-                num_decode_prealloc_queue_reqs=int(global_info[i][0][13]),
-                num_decode_transfer_queue_reqs=int(global_info[i][0][14]),
-            ) for i in range(dp_size)
-        ]
-        return res
 
     def _stats_to_tensor(self, stats: SchedulerStats) -> torch.Tensor:
         data = torch.zeros(15, dtype=torch.float32)
@@ -353,27 +337,44 @@ class SchedulerMetricsCollector:
         return data
 
     def log_stats(self, stats: SchedulerStats, dp_size: int, attn_tp_rank: int, attn_tp_size: int, tp_cpu_group) -> None:
-        stats_list = self.gather_stats(stats, dp_size, attn_tp_rank, attn_tp_size, tp_cpu_group)
+        if attn_tp_rank != 0:
+            local_info = torch.zeros(15, dtype=torch.float32)
+        else:
+            local_info = self._stats_to_tensor(stats)
+            if local_info.size(0) != 15:
+                raise ValueError(f"local_info.size(0) != 15: {local_info.size(0)}")
+        global_info = torch.empty(
+            (dp_size, attn_tp_size, 15),
+            dtype=torch.float32
+        )
+        torch.distributed.all_gather_into_tensor(
+            global_info.flatten(),
+            local_info,
+            group=tp_cpu_group,
+        )
         if attn_tp_rank != 0:
             return
 
-        for i, stat in enumerate(stats_list):
-            self._log_gauge_with_dp(self.num_running_reqs, stat.num_running_reqs, i)
-            self._log_gauge_with_dp(self.num_used_tokens, stat.num_used_tokens, i)
-            self._log_gauge_with_dp(self.token_usage, stat.token_usage, i)
-            self._log_gauge_with_dp(self.gen_throughput, stat.gen_throughput, i)
-            self._log_gauge_with_dp(self.num_queue_reqs, stat.num_queue_reqs, i)
-            self._log_gauge_with_dp(self.num_grammar_queue_reqs, stat.num_grammar_queue_reqs, i)
-            self._log_gauge_with_dp(self.cache_hit_rate, stat.cache_hit_rate, i)
-            self._log_gauge_with_dp(self.spec_accept_length, stat.spec_accept_length, i)
-            self._log_gauge_with_dp(self.avg_request_queue_latency, stat.avg_request_queue_latency, i)
-            self._log_gauge_with_dp(self.input_throughput_schedule_time, stat.input_throughput_schedule_time, i)
-            self._log_gauge_with_dp(self.input_throughput_run_time, stat.input_throughput_run_time, i)
-            # Disaggregation queue metrics
-            self._log_gauge_with_dp(self.num_prefill_prealloc_queue_reqs, stat.num_prefill_prealloc_queue_reqs, i)
-            self._log_gauge_with_dp(self.num_prefill_infight_queue_reqs, stat.num_prefill_infight_queue_reqs, i)
-            self._log_gauge_with_dp(self.num_decode_prealloc_queue_reqs, stat.num_decode_prealloc_queue_reqs, i)
-            self._log_gauge_with_dp(self.num_decode_transfer_queue_reqs, stat.num_decode_transfer_queue_reqs, i)
+        stats_data = global_info[:, 0, :].cpu().numpy()  # shape: (dp_size, 15)
+
+        for i, stat in enumerate(stats_data):
+            assert (i < self.dp_size), f"dp_rank must smaller than dp_size"
+            gauges = self._labeled_gauges[i]
+            gauges['num_running_reqs'].set(stat[0])
+            gauges['num_used_tokens'].set(stat[1])
+            gauges['token_usage'].set(stat[2])
+            gauges['num_queue_reqs'].set(stat[3])
+            gauges['cache_hit_rate'].set(stat[4])
+            gauges['avg_request_queue_latency'].set(stat[5])
+            gauges['gen_throughput'].set(stat[6])
+            gauges['num_grammar_queue_reqs'].set(stat[7])
+            gauges['spec_accept_length'].set(stat[8])
+            gauges['input_throughput_schedule_time'].set(stat[9])
+            gauges['input_throughput_run_time'].set(stat[10])
+            gauges['num_prefill_prealloc_queue_reqs'].set(stat[11])
+            gauges['num_prefill_infight_queue_reqs'].set(stat[12])
+            gauges['num_decode_prealloc_queue_reqs'].set(stat[13])
+            gauges['num_decode_transfer_queue_reqs'].set(stat[14])
 
         self.last_log_time = time.perf_counter()
 
@@ -602,13 +603,13 @@ class TokenizerMetricsCollector:
     def observe_time_to_first_token(self, value: float):
         self.histogram_time_to_first_token.labels(**self.labels).observe(value)
 
-    def observe_inter_token_latency(self, internval: float, num_new_tokens: int):
-        adjusted_interval = internval / num_new_tokens
+    def observe_inter_token_latency(self, interval: float, num_new_tokens: int):
+        adjusted_interval = interval / num_new_tokens
 
         # A faster version of the Histogram::observe which observes multiple values at the same time.
         # reference: https://github.com/prometheus/client_python/blob/v0.21.1/prometheus_client/metrics.py#L639
         his = self.histogram_inter_token_latency_seconds.labels(**self.labels)
-        his._sum.inc(internval)
+        his._sum.inc(interval)
 
         for i, bound in enumerate(his._upper_bounds):
             if adjusted_interval <= bound:
