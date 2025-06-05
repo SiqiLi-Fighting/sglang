@@ -189,7 +189,9 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
         )
 
     def _on_hook(self, hook_name: str, **kwargs):
-        if not (self._recording or torch.cuda.is_current_stream_capturing()):
+        from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+
+        if not (self._recording or get_is_capture_mode()):
             return
         gatherer = self._single_pass_gatherers[
             self._accumulator.get_single_pass_gatherer_key(
@@ -701,7 +703,7 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
             ),
             buffer_size=self._server_args.expert_distribution_recorder_buffer_size,
             dtype=torch.int32,
-            device=self._server_args.device,
+            device="cpu",
         )
 
     def append(
@@ -711,10 +713,9 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
         single_pass_data: Dict,
     ):
         super().append(forward_pass_id, gatherer_key, single_pass_data)
-        # Can optimize if overhead here is large
-        self._global_physical_count_of_buffered_step.append(
-            single_pass_data["global_physical_count"]
-        )
+        gpu_count = single_pass_data["global_physical_count"]
+        cpu_count = gpu_count.cpu() if gpu_count.device.type != "cpu" else gpu_count
+        self._global_physical_count_of_buffered_step.append(cpu_count)
 
     def reset(self):
         super().reset()
@@ -725,11 +726,19 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
             self._global_physical_count_of_buffered_step.get_all(),
             num_layers=self._expert_location_metadata.num_layers,
             num_logical_experts=self._expert_location_metadata.num_logical_experts,
-            physical_to_logical_map=self._expert_location_metadata.physical_to_logical_map,
+            physical_to_logical_map=self._expert_location_metadata.physical_to_logical_map.cpu(),
         )
-        torch.distributed.all_reduce(
-            logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
-        )
+
+        if torch.distributed.get_backend() == "nccl":
+            device = self._server_args.device
+            gpu_tensor = logical_count_of_buffered_step.to(device)
+            torch.distributed.all_reduce(gpu_tensor, op=torch.distributed.ReduceOp.SUM)
+            logical_count_of_buffered_step = gpu_tensor.cpu()
+        else:
+            torch.distributed.all_reduce(
+                logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
+            )
+
         output = dict(
             rank=self._rank,
             logical_count=logical_count_of_buffered_step,

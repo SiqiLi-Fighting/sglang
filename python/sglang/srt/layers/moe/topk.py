@@ -310,7 +310,7 @@ def select_experts(
     num_token_non_padded: Optional[torch.Tensor] = None,
     expert_location_dispatch_info: Optional[ExpertLocationDispatchInfo] = None,
 ):
-    num_fused_shared_experts = global_server_args_dict["num_fused_shared_experts"]
+    n_share_experts_fusion = global_server_args_dict["n_share_experts_fusion"]
 
     router_logits, correction_bias = (
         expert_location_dispatch.transform_select_experts_inputs(

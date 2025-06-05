@@ -328,6 +328,7 @@ class CudaGraphRunner:
                 if self.model_runner.spec_algorithm.is_eagle()
                 else sum(forward_batch.global_num_tokens_cpu)
             )
+            max_num_tokens = max(forward_batch.global_num_tokens_cpu)
             is_bs_supported = forward_batch.can_run_dp_cuda_graph and (
                 total_batch_size in self.graphs
                 if self.disable_padding

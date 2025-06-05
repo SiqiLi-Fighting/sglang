@@ -894,6 +894,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     # Whether to return hidden states
     return_hidden_states: bool = False
 
+    # For logging batch throughput
+    num_prefill_tokens: int = 0
+    schedule_batch_time: float = 0.0
+    run_batch_time: float = 0.0
+
     @classmethod
     def init_new(
         cls,
@@ -906,6 +911,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         spec_algorithm: SpeculativeAlgorithm,
         enable_custom_logit_processor: bool,
         chunked_req: Optional[Req] = None,
+        num_prefill_tokens: int = 0,
+        schedule_batch_time: float = 0.0,
     ):
         return_logprob = any(req.return_logprob for req in reqs)
 
@@ -924,6 +931,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             enable_custom_logit_processor=enable_custom_logit_processor,
             return_hidden_states=any(req.return_hidden_states for req in reqs),
             chunked_req=chunked_req,
+            num_prefill_tokens=num_prefill_tokens,
+            schedule_batch_time=schedule_batch_time,
         )
 
     def batch_size(self):
@@ -1730,6 +1739,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             global_num_tokens_for_logprob=self.global_num_tokens_for_logprob,
             can_run_dp_cuda_graph=self.can_run_dp_cuda_graph,
             global_is_extend_in_batch=self.global_is_extend_in_batch,
+            num_prefill_tokens=self.num_prefill_tokens,
+            schedule_batch_time=self.schedule_batch_time,
+            run_batch_time=self.run_batch_time,
         )
 
     def __str__(self):

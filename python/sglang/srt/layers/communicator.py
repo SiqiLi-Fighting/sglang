@@ -12,6 +12,7 @@
 # limitations under the License.
 # ==============================================================================
 
+import logging
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -34,6 +35,8 @@ from sglang.srt.layers.dp_attention import (
 )
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+
+logger = logging.getLogger(__name__)
 
 
 class ScatterMode(Enum):
@@ -144,6 +147,7 @@ class LayerCommunicator:
         layer_scatter_modes: LayerScatterModes,
         input_layernorm: torch.nn.Module,
         post_attention_layernorm: torch.nn.Module,
+        is_nextn: bool = False,
     ):
         self.layer_scatter_modes = layer_scatter_modes
         self.input_layernorm = input_layernorm
@@ -170,6 +174,7 @@ class LayerCommunicator:
                 residual_input_mode=self.layer_scatter_modes.middle_residual_mode,
                 output_mode=self.layer_scatter_modes.layer_output_mode,
                 context=self._context,
+                is_nextn=is_nextn,
             )
         )
 
@@ -216,6 +221,16 @@ class LayerCommunicator:
         residual: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
+
+        logger.info(
+            f"nextn11111--------------_communicate_summable_tensor_pair_fn {self._communicate_summable_tensor_pair_fn}"
+        )
+        logger.info(
+            f"hidden_states_input_mode={self.layer_scatter_modes.attn_mode},"
+            f"residual_input_mode={self.layer_scatter_modes.layer_input_mode},"
+            f"hidden_states_output_mode={self.layer_scatter_modes.mlp_mode},"
+            f"residual_output_mode={self.layer_scatter_modes.middle_residual_mode},"
+        )
         return self._communicate_summable_tensor_pair_fn(
             hidden_states=hidden_states,
             residual=residual,
@@ -427,8 +442,11 @@ class CommunicateSummableTensorPairFn:
         hidden_states_input_mode: ScatterMode,
         residual_input_mode: ScatterMode,
         output_mode: ScatterMode,
-        context: CommunicateContext,
+        context: _LayerModeComputationContext,
+        is_nextn: bool = False,
     ):
+        if is_nextn:
+            return CommunicateSummableTensorPairFn._gather
         if context.is_same_group_size(
             hidden_states_input_mode, output_mode
         ) and context.is_same_group_size(residual_input_mode, output_mode):
