@@ -251,7 +251,7 @@ class SchedulerDisaggregationPrefillMixin:
             self.running_batch.batch_is_full = False
 
             self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
-            if self.schedule_ct % 10 == 0:
+            if self.schedule_ct % 2 == 0:
                 self.log_stats()
 
     @torch.no_grad()
@@ -308,7 +308,7 @@ class SchedulerDisaggregationPrefillMixin:
             # Otherwise, it hangs under high concurrency
             self.running_batch.batch_is_full = False
             self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
-            if self.schedule_ct % 10 == 0:
+            if self.schedule_ct % 2 == 0:
                 self.log_stats()
 
     def process_batch_result_disagg_prefill(

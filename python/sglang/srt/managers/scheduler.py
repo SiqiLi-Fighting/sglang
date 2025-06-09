@@ -662,6 +662,7 @@ class Scheduler(
             self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
             if self.schedule_ct % 10 == 0:
                 self.log_stats()
+
     @DynamicGradMode()
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
@@ -711,6 +712,7 @@ class Scheduler(
             self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
             if self.schedule_ct % 10 == 0:
                 self.log_stats()
+                
     @DynamicGradMode()
     def event_loop_pp(self):
         """A non-overlap scheduler loop for pipeline parallelism."""
