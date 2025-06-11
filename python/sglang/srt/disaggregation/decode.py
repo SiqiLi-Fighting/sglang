@@ -489,7 +489,7 @@ class SchedulerDisaggregationDecodeMixin:
 
             self.last_batch = batch
             self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
-            if self.schedule_ct % 40 == 0:
+            if self.schedule_ct % 4 == 0:
                 self.log_stats()
 
     @torch.no_grad()
@@ -571,7 +571,7 @@ class SchedulerDisaggregationDecodeMixin:
             self.last_batch = batch
             self.last_batch_in_queue = last_batch_in_queue
             self.schedule_ct = (self.schedule_ct + 1) % (1 << 30)
-            if self.schedule_ct % 40 == 0:
+            if self.schedule_ct % 4 == 0:
                 self.log_stats()
 
     def get_next_disagg_decode_batch_to_run(
