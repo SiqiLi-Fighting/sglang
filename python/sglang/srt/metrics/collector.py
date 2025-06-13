@@ -17,11 +17,17 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Union
+import multiprocessing
 
 from sglang.srt.utils import get_bool_env_var
 
 SGLANG_TEST_REQUEST_TIME_STATS = get_bool_env_var("SGLANG_TEST_REQUEST_TIME_STATS")
 import torch
+import logging
+import psutil
+import os
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TimeStats:
@@ -152,157 +158,246 @@ class SchedulerStats:
 class SchedulerMetricsCollector:
 
     def __init__(self, tp_rank: int, dp_size: int, labels: Dict[str, str]) -> None:
-        # We need to import prometheus_client after setting the env variable `PROMETHEUS_MULTIPROC_DIR`
-        from prometheus_client import Counter, Gauge
-
         self.labels = labels
         self.tp_rank = tp_rank
         self.dp_size = dp_size
         self.last_log_time = time.perf_counter()
 
-        labelnames_dp = list(labels.keys())
-        labelnames_dp.append("dp")
-
-        self.num_running_reqs = Gauge(
-            name="sglang:num_running_reqs",
-            documentation="The number of running requests.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.num_used_tokens = Gauge(
-            name="sglang:num_used_tokens",
-            documentation="The number of used tokens.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.token_usage = Gauge(
-            name="sglang:token_usage",
-            documentation="The token usage.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.gen_throughput = Gauge(
-            name="sglang:gen_throughput",
-            documentation="The generation throughput (token/s).",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.num_queue_reqs = Gauge(
-            name="sglang:num_queue_reqs",
-            documentation="The number of requests in the waiting queue.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.num_grammar_queue_reqs = Gauge(
-            name="sglang:num_grammar_queue_reqs",
-            documentation="The number of requests in the grammar waiting queue.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.cache_hit_rate = Gauge(
-            name="sglang:cache_hit_rate",
-            documentation="The prefix cache hit rate.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.spec_accept_length = Gauge(
-            name="sglang:spec_accept_length",
-            documentation="The average acceptance length of speculative decoding.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.avg_request_queue_latency = Gauge(
-            name="sglang:avg_request_queue_latency",
-            documentation="The average request queue latency for the last batch of requests in seconds.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.input_throughput_schedule_time = Gauge(
-            name="sglang:input_throughput_schedule_time",
-            documentation="The input throughput in schedule time.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.input_throughput_run_time = Gauge(
-            name="sglang:input_throughput_run_time",
-            documentation="The input throughput in run time.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        # Disaggregation queue metrics
-        self.num_prefill_prealloc_queue_reqs = Gauge(
-            name="sglang:num_prefill_prealloc_queue_reqs",
-            documentation="The number of requests in the prefill prealloc queue.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.num_prefill_infight_queue_reqs = Gauge(
-            name="sglang:num_prefill_infight_queue_reqs",
-            documentation="The number of requests in the prefill infight queue.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.num_decode_prealloc_queue_reqs = Gauge(
-            name="sglang:num_decode_prealloc_queue_reqs",
-            documentation="The number of requests in the decode prealloc queue.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.num_decode_transfer_queue_reqs = Gauge(
-            name="sglang:num_decode_transfer_queue_reqs",
-            documentation="The number of requests in the decode transfer queue.",
-            labelnames=labelnames_dp,
-            multiprocess_mode="mostrecent",
-        )
-
-        self.num_bootstrap_failed_reqs = Counter(
-            name="sglang:num_bootstrap_failed_reqs",
-            documentation="The number of bootstrap failed requests.",
-            labelnames=labels.keys(),
-        )
-
-        self.num_transfer_failed_reqs = Counter(
-            name="sglang:num_transfer_failed_reqs",
-            documentation="The number of transfer failed requests.",
-            labelnames=labels.keys(),
-        )
-
-        self._labeled_gauges = {}
-        for dp in range(dp_size):
-            dp_labels = labels.copy()
-            dp_labels["dp"] = str(dp)
+        if self.tp_rank == 0:
+            self.shared_array = multiprocessing.Array('f', dp_size * 15)
+            self.data_lock = multiprocessing.Lock()
+            self.data_ready = multiprocessing.Event()
             
-            self._labeled_gauges[dp] = {
-                'num_running_reqs': self.num_running_reqs.labels(**dp_labels),
-                'num_used_tokens': self.num_used_tokens.labels(**dp_labels),
-                'token_usage': self.token_usage.labels(**dp_labels),
-                'gen_throughput': self.gen_throughput.labels(**dp_labels),
-                'num_queue_reqs': self.num_queue_reqs.labels(**dp_labels),
-                'cache_hit_rate': self.cache_hit_rate.labels(**dp_labels),
-                'num_grammar_queue_reqs': self.num_grammar_queue_reqs.labels(**dp_labels),
-                'spec_accept_length': self.spec_accept_length.labels(**dp_labels),
-                'avg_request_queue_latency': self.avg_request_queue_latency.labels(**dp_labels),
-                'input_throughput_schedule_time': self.input_throughput_schedule_time.labels(**dp_labels),
-                'input_throughput_run_time': self.input_throughput_run_time.labels(**dp_labels),
-                'num_prefill_prealloc_queue_reqs': self.num_prefill_prealloc_queue_reqs.labels(**dp_labels),
-                'num_prefill_infight_queue_reqs': self.num_prefill_infight_queue_reqs.labels(**dp_labels),
-                'num_decode_prealloc_queue_reqs': self.num_decode_prealloc_queue_reqs.labels(**dp_labels),
-                'num_decode_transfer_queue_reqs': self.num_decode_transfer_queue_reqs.labels(**dp_labels),
-            }
+            self._metrics_process = multiprocessing.Process(
+                target=SchedulerMetricsCollector._metrics_updater_process,
+                args=(self.shared_array, self.data_lock, self.data_ready, dp_size, labels)
+            )
+            self._metrics_process.daemon = True
+            self._metrics_process.start()
+
+    @staticmethod
+    def _metrics_updater_process(shared_array, data_lock, data_ready, dp_size, labels):
+        import numpy as np
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s [Metrics Process %(process)d] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        logger = logging.getLogger(__name__)
+        try:
+            process = psutil.Process(os.getpid())
+            total_physical_cores = psutil.cpu_count(logical=False)
+            total_cores = psutil.cpu_count()
+            
+            if total_cores > total_physical_cores:
+                last_physical_core = total_physical_cores - 1
+                corresponding_ht_core = last_physical_core + total_physical_cores
+                metrics_cores = [last_physical_core, corresponding_ht_core]
+            else:
+                metrics_cores = [total_physical_cores - 1]
+            
+            process.cpu_affinity(metrics_cores)
+            logger.info(f"Metrics collector process {os.getpid()} running on CPUs: {process.cpu_affinity()}")
+
+            # We need to import prometheus_client after setting the env variable `PROMETHEUS_MULTIPROC_DIR`
+            from prometheus_client import Counter, Gauge
+
+            labelnames_dp = list(labels.keys())
+            labelnames_dp.append("dp")
+
+            num_running_reqs = Gauge(
+                name="sglang:num_running_reqs",
+                documentation="The number of running requests.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            num_used_tokens = Gauge(
+                name="sglang:num_used_tokens",
+                documentation="The number of used tokens.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            token_usage = Gauge(
+                name="sglang:token_usage",
+                documentation="The token usage.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            gen_throughput = Gauge(
+                name="sglang:gen_throughput",
+                documentation="The generation throughput (token/s).",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            num_queue_reqs = Gauge(
+                name="sglang:num_queue_reqs",
+                documentation="The number of requests in the waiting queue.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            num_grammar_queue_reqs = Gauge(
+                name="sglang:num_grammar_queue_reqs",
+                documentation="The number of requests in the grammar waiting queue.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            cache_hit_rate = Gauge(
+                name="sglang:cache_hit_rate",
+                documentation="The prefix cache hit rate.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            spec_accept_length = Gauge(
+                name="sglang:spec_accept_length",
+                documentation="The average acceptance length of speculative decoding.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            avg_request_queue_latency = Gauge(
+                name="sglang:avg_request_queue_latency",
+                documentation="The average request queue latency for the last batch of requests in seconds.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            input_throughput_schedule_time = Gauge(
+                name="sglang:input_throughput_schedule_time",
+                documentation="The input throughput in schedule time.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            input_throughput_run_time = Gauge(
+                name="sglang:input_throughput_run_time",
+                documentation="The input throughput in run time.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            # Disaggregation queue metrics
+            num_prefill_prealloc_queue_reqs = Gauge(
+                name="sglang:num_prefill_prealloc_queue_reqs",
+                documentation="The number of requests in the prefill prealloc queue.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            num_prefill_infight_queue_reqs = Gauge(
+                name="sglang:num_prefill_infight_queue_reqs",
+                documentation="The number of requests in the prefill infight queue.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            num_decode_prealloc_queue_reqs = Gauge(
+                name="sglang:num_decode_prealloc_queue_reqs",
+                documentation="The number of requests in the decode prealloc queue.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            num_decode_transfer_queue_reqs = Gauge(
+                name="sglang:num_decode_transfer_queue_reqs",
+                documentation="The number of requests in the decode transfer queue.",
+                labelnames=labelnames_dp,
+                multiprocess_mode="mostrecent",
+            )
+
+            labeled_gauges = {}
+            for dp in range(dp_size):
+                dp_labels = labels.copy()
+                dp_labels["dp"] = str(dp)
+                
+                labeled_gauges[dp] = {
+                    'num_running_reqs': num_running_reqs.labels(**dp_labels),
+                    'num_used_tokens': num_used_tokens.labels(**dp_labels),
+                    'token_usage': token_usage.labels(**dp_labels),
+                    'gen_throughput': gen_throughput.labels(**dp_labels),
+                    'num_queue_reqs': num_queue_reqs.labels(**dp_labels),
+                    'cache_hit_rate': cache_hit_rate.labels(**dp_labels),
+                    'num_grammar_queue_reqs': num_grammar_queue_reqs.labels(**dp_labels),
+                    'spec_accept_length': spec_accept_length.labels(**dp_labels),
+                    'avg_request_queue_latency': avg_request_queue_latency.labels(**dp_labels),
+                    'input_throughput_schedule_time': input_throughput_schedule_time.labels(**dp_labels),
+                    'input_throughput_run_time': input_throughput_run_time.labels(**dp_labels),
+                    'num_prefill_prealloc_queue_reqs': num_prefill_prealloc_queue_reqs.labels(**dp_labels),
+                    'num_prefill_infight_queue_reqs': num_prefill_infight_queue_reqs.labels(**dp_labels),
+                    'num_decode_prealloc_queue_reqs': num_decode_prealloc_queue_reqs.labels(**dp_labels),
+                    'num_decode_transfer_queue_reqs': num_decode_transfer_queue_reqs.labels(**dp_labels),
+                }
+            
+
+            shared_np = np.frombuffer(shared_array.get_obj(), dtype=np.float32)
+            shared_np = shared_np.reshape((dp_size, 15))
+
+            while True:
+                try:
+                    if data_ready.wait(timeout=15):
+                        data_ready.clear()
+                        with data_lock:
+                            stats = shared_np.copy()
+
+                        if stats is not None and stats.size > 0:
+                            for i, stat in enumerate(stats):
+                                if i >= dp_size:
+                                    break
+                                gauges = labeled_gauges[i]
+                                gauges['num_running_reqs'].set(stat[0])
+                                gauges['num_used_tokens'].set(stat[1])
+                                gauges['token_usage'].set(stat[2])
+                                gauges['num_queue_reqs'].set(stat[3])
+                                gauges['cache_hit_rate'].set(stat[4])
+                                gauges['avg_request_queue_latency'].set(stat[5])
+                                gauges['gen_throughput'].set(stat[6])
+                                gauges['num_grammar_queue_reqs'].set(stat[7])
+                                gauges['spec_accept_length'].set(stat[8])
+                                gauges['input_throughput_schedule_time'].set(stat[9])
+                                gauges['input_throughput_run_time'].set(stat[10])
+                                gauges['num_prefill_prealloc_queue_reqs'].set(stat[11])
+                                gauges['num_prefill_infight_queue_reqs'].set(stat[12])
+                                gauges['num_decode_prealloc_queue_reqs'].set(stat[13])
+                                gauges['num_decode_transfer_queue_reqs'].set(stat[14])
+                    else:
+                        logger.info("No data received from the main process")
+                except Exception as e:
+                    logger.warning(f"Metrics updater error: {e}")
+                    time.sleep(1)
+                
+        except Exception as e:
+                logger.error(f"Error in metrics collector process: {e}")
+
+
+    def update_stats(self, stats):
+        import numpy as np
+        try:
+            if not isinstance(stats, np.ndarray):
+                logger.warning(f"Invalid stats type: {type(stats)}")
+                return
+                
+            if stats.shape != (self.dp_size, 15):
+                logger.warning(f"Invalid stats shape: {stats.shape}, expected ({self.dp_size}, 15)")
+                return
+            
+            if stats.dtype != np.float32:
+                stats = stats.astype(np.float32)
+            
+            shared_np = np.frombuffer(self.shared_array.get_obj(), dtype=np.float32)
+            shared_np = shared_np.reshape((self.dp_size, 15))
+            
+            with self.data_lock:
+                np.copyto(shared_np, stats)
+            
+            self.data_ready.set()
+        except Exception as e:
+            logger.warning(f"Error in update_stats: {e}")
 
     def _log_gauge_with_dp(self, gauge, data: Union[int, float], labels: Dict[str, str]) -> None:
         gauge.labels(labels).set(data)
@@ -310,12 +405,6 @@ class SchedulerMetricsCollector:
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
-
-    def increment_bootstrap_failed_reqs(self) -> None:
-        self.num_bootstrap_failed_reqs.labels(**self.labels).inc(1)
-
-    def increment_transfer_failed_reqs(self) -> None:
-        self.num_transfer_failed_reqs.labels(**self.labels).inc(1)
 
     def _stats_to_tensor(self, stats: SchedulerStats) -> torch.Tensor:
         data = torch.zeros(15, dtype=torch.float32)
@@ -338,46 +427,33 @@ class SchedulerMetricsCollector:
 
     def log_stats(self, stats: SchedulerStats, dp_size: int, attn_tp_rank: int, attn_tp_size: int, tp_cpu_group) -> None:
         if attn_tp_rank != 0:
-            local_info = torch.zeros(15, dtype=torch.float32)
+            local_info = torch.zeros(15, dtype=torch.float32, device="cpu")
         else:
             local_info = self._stats_to_tensor(stats)
             if local_info.size(0) != 15:
                 raise ValueError(f"local_info.size(0) != 15: {local_info.size(0)}")
+            
         global_info = torch.empty(
             (dp_size, attn_tp_size, 15),
-            dtype=torch.float32
+            dtype=torch.float32,
+            device="cpu",
         )
+        
         torch.distributed.all_gather_into_tensor(
             global_info.flatten(),
             local_info,
             group=tp_cpu_group,
         )
-        if attn_tp_rank != 0:
-            return
+        
+        # Only log the stats for the first TP rank of the first DP rank
+        if attn_tp_rank == 0 and self.tp_rank == 0:
+            self.update_stats(global_info[:, 0, :].numpy())
+            self.last_log_time = time.perf_counter()
 
-        stats_data = global_info[:, 0, :].cpu().numpy()  # shape: (dp_size, 15)
-
-        for i, stat in enumerate(stats_data):
-            assert (i < self.dp_size), f"dp_rank must smaller than dp_size"
-            gauges = self._labeled_gauges[i]
-            gauges['num_running_reqs'].set(stat[0])
-            gauges['num_used_tokens'].set(stat[1])
-            gauges['token_usage'].set(stat[2])
-            gauges['num_queue_reqs'].set(stat[3])
-            gauges['cache_hit_rate'].set(stat[4])
-            gauges['avg_request_queue_latency'].set(stat[5])
-            gauges['gen_throughput'].set(stat[6])
-            gauges['num_grammar_queue_reqs'].set(stat[7])
-            gauges['spec_accept_length'].set(stat[8])
-            gauges['input_throughput_schedule_time'].set(stat[9])
-            gauges['input_throughput_run_time'].set(stat[10])
-            gauges['num_prefill_prealloc_queue_reqs'].set(stat[11])
-            gauges['num_prefill_infight_queue_reqs'].set(stat[12])
-            gauges['num_decode_prealloc_queue_reqs'].set(stat[13])
-            gauges['num_decode_transfer_queue_reqs'].set(stat[14])
-
-        self.last_log_time = time.perf_counter()
-
+    def __del__(self):
+        if hasattr(self, '_metrics_process') and self.tp_rank == 0 and self._metrics_process:
+            self._metrics_process.terminate()
+            self._metrics_process.join(timeout=1)
 
 class TokenizerMetricsCollector:
     def __init__(
