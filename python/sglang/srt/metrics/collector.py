@@ -24,7 +24,6 @@ from sglang.srt.utils import get_bool_env_var
 SGLANG_TEST_REQUEST_TIME_STATS = get_bool_env_var("SGLANG_TEST_REQUEST_TIME_STATS")
 import torch
 import logging
-import queue
 import psutil
 import os
 
@@ -165,17 +164,20 @@ class SchedulerMetricsCollector:
         self.last_log_time = time.perf_counter()
 
         if self.tp_rank == 0:
-            self.stats_queue = multiprocessing.Queue(maxsize=1)
+            self.shared_array = multiprocessing.Array('f', dp_size * 15)
+            self.data_lock = multiprocessing.Lock()
+            self.data_ready = multiprocessing.Event()
+            
             self._metrics_process = multiprocessing.Process(
                 target=SchedulerMetricsCollector._metrics_updater_process,
-                args=(self.stats_queue, dp_size, labels)
+                args=(self.shared_array, self.data_lock, self.data_ready, dp_size, labels)
             )
             self._metrics_process.daemon = True
             self._metrics_process.start()
 
     @staticmethod
-    def _metrics_updater_process(stats_queue, dp_size, labels):
-        import logging
+    def _metrics_updater_process(shared_array, data_lock, data_ready, dp_size, labels):
+        import numpy as np
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s [Metrics Process %(process)d] %(message)s',
@@ -331,40 +333,40 @@ class SchedulerMetricsCollector:
                     'num_decode_prealloc_queue_reqs': num_decode_prealloc_queue_reqs.labels(**dp_labels),
                     'num_decode_transfer_queue_reqs': num_decode_transfer_queue_reqs.labels(**dp_labels),
                 }
+            
+
+            shared_np = np.frombuffer(shared_array.get_obj(), dtype=np.float32)
+            shared_np = shared_np.reshape((dp_size, 15))
 
             while True:
                 try:
-                    stats = stats_queue.get(timeout=15)
-            
-                    try:
-                        newer_stats = stats_queue.get_nowait()
-                        if newer_stats is not None:
-                            stats = newer_stats
-                    except queue.Empty:
-                        pass
+                    if data_ready.wait(timeout=15):
+                        data_ready.clear()
+                        with data_lock:
+                            stats = shared_np.copy()
 
-                    if stats is not None and stats.size > 0:
-                        for i, stat in enumerate(stats):
-                            if i >= dp_size:
-                                break
-                            gauges = labeled_gauges[i]
-                            gauges['num_running_reqs'].set(stat[0])
-                            gauges['num_used_tokens'].set(stat[1])
-                            gauges['token_usage'].set(stat[2])
-                            gauges['num_queue_reqs'].set(stat[3])
-                            gauges['cache_hit_rate'].set(stat[4])
-                            gauges['avg_request_queue_latency'].set(stat[5])
-                            gauges['gen_throughput'].set(stat[6])
-                            gauges['num_grammar_queue_reqs'].set(stat[7])
-                            gauges['spec_accept_length'].set(stat[8])
-                            gauges['input_throughput_schedule_time'].set(stat[9])
-                            gauges['input_throughput_run_time'].set(stat[10])
-                            gauges['num_prefill_prealloc_queue_reqs'].set(stat[11])
-                            gauges['num_prefill_infight_queue_reqs'].set(stat[12])
-                            gauges['num_decode_prealloc_queue_reqs'].set(stat[13])
-                            gauges['num_decode_transfer_queue_reqs'].set(stat[14])
-                except queue.Empty:
-                    logger.debug("Metrics updater queue is empty")
+                        if stats is not None and stats.size > 0:
+                            for i, stat in enumerate(stats):
+                                if i >= dp_size:
+                                    break
+                                gauges = labeled_gauges[i]
+                                gauges['num_running_reqs'].set(stat[0])
+                                gauges['num_used_tokens'].set(stat[1])
+                                gauges['token_usage'].set(stat[2])
+                                gauges['num_queue_reqs'].set(stat[3])
+                                gauges['cache_hit_rate'].set(stat[4])
+                                gauges['avg_request_queue_latency'].set(stat[5])
+                                gauges['gen_throughput'].set(stat[6])
+                                gauges['num_grammar_queue_reqs'].set(stat[7])
+                                gauges['spec_accept_length'].set(stat[8])
+                                gauges['input_throughput_schedule_time'].set(stat[9])
+                                gauges['input_throughput_run_time'].set(stat[10])
+                                gauges['num_prefill_prealloc_queue_reqs'].set(stat[11])
+                                gauges['num_prefill_infight_queue_reqs'].set(stat[12])
+                                gauges['num_decode_prealloc_queue_reqs'].set(stat[13])
+                                gauges['num_decode_transfer_queue_reqs'].set(stat[14])
+                    else:
+                        logger.info("No data received from the main process")
                 except Exception as e:
                     logger.warning(f"Metrics updater error: {e}")
                     time.sleep(1)
@@ -374,15 +376,28 @@ class SchedulerMetricsCollector:
 
 
     def update_stats(self, stats):
+        import numpy as np
         try:
-            while True:
-                try:
-                    self.stats_queue.get_nowait()
-                except queue.Empty:
-                    break
-            self.stats_queue.put_nowait(stats)
-        except queue.Full:
-            pass
+            if not isinstance(stats, np.ndarray):
+                logger.warning(f"Invalid stats type: {type(stats)}")
+                return
+                
+            if stats.shape != (self.dp_size, 15):
+                logger.warning(f"Invalid stats shape: {stats.shape}, expected ({self.dp_size}, 15)")
+                return
+            
+            if stats.dtype != np.float32:
+                stats = stats.astype(np.float32)
+            
+            shared_np = np.frombuffer(self.shared_array.get_obj(), dtype=np.float32)
+            shared_np = shared_np.reshape((self.dp_size, 15))
+            
+            with self.data_lock:
+                np.copyto(shared_np, stats)
+            
+            self.data_ready.set()
+        except Exception as e:
+            logger.warning(f"Error in update_stats: {e}")
 
     def _log_gauge_with_dp(self, gauge, data: Union[int, float], labels: Dict[str, str]) -> None:
         gauge.labels(labels).set(data)
