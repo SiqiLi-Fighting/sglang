@@ -503,6 +503,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if tp_size is None:
             tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank, self.tp_size = tp_rank, tp_size
+        logger.info(
+            f"assert all(output_size % tp_size == 0 for output_size in output_sizes) {output_sizes}"
+        )
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
         self.use_presharded_weights = use_presharded_weights
         super().__init__(
